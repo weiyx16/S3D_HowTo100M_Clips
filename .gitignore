@@ -1,0 +1,6 @@
+*.pth
+*.npy
+data/*
+exp/*
+feature/*
+*id2path*
