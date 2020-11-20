@@ -3,4 +3,6 @@
 data/*
 exp/*
 feature/*
-*id2path*
+*id2path*.csv
+*pyc
+__pycache__/*

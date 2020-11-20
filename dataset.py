@@ -88,11 +88,16 @@ class VideoClipDataset(Dataset):
     def __getitem__(self, idx):
         video_id = self.id2path['video_id'].values[idx]
         video_path = os.path.join(self.data_root, self.id2path['video_path'].values[idx])
-        output_file = os.path.join('/data/home/v-yixwe/100M', self.id2path['feature_path'].values[idx])
+        output_file = os.path.join(self.data_root, self.id2path['feature_path'].values[idx]) #'/data/home/v-yixwe/100M'
         pathlib.Path(output_file).mkdir(parents=True, exist_ok=True)
-        caption_info = self.annotation[video_id]
-        start_list = caption_info['start']
-        end_list = caption_info['end']
+        try:
+            caption_info = self.annotation[video_id]
+        except KeyError as e:
+            start_list, end_list = None, None
+            #return {'input': video_path, 'input_path': 'NoFile', 'output_path': output_file}
+        else:
+            start_list = caption_info['start']
+            end_list = caption_info['end']
         
         video_ext = ".webm"
         if os.path.isfile(os.path.join(video_path, video_id+video_ext)):
@@ -106,11 +111,19 @@ class VideoClipDataset(Dataset):
                 h, w = self._get_video_dim(video_path)
             except:
                 print('ffprobe failed at: {}'.format(video_path))
-                return {'video': torch.zeros(1), 'input': video_path}
+                return {'input': video_path, 'video_id': 'NoFile', 'output_path': output_file}
             height, width = self._get_output_dim(h, w)
+            input_args = {
+                "hwaccel": "auto", #nvdec / cuvid
+                # "vcodec": "h264_cuvid",
+            }
+            output_args = {
+                # "vcodec": "hevc_nvenc",
+                # "c:v": "hevc_nvenc",
+            }
             cmd = (
                 ffmpeg
-                .input(video_path)
+                .input(video_path,**input_args)
                 .filter('fps', fps=self.framerate)
                 .filter('scale', width, height)
             )
@@ -119,7 +132,7 @@ class VideoClipDataset(Dataset):
                 y = int((height - self.size) / 2.0)
                 cmd = cmd.crop(x, y, self.size, self.size)
             out, _ = (
-                cmd.output('pipe:', format='rawvideo', pix_fmt='rgb24')
+                cmd.output('pipe:', format='rawvideo', pix_fmt='rgb24', **output_args)
                 .run(capture_stdout=True, quiet=True)
             )
             # print('Finish Decoding video: {}'.format(video_path))
@@ -142,6 +155,11 @@ class VideoClipDataset(Dataset):
             #     clip_out = torch.from_numpy(clip_out.astype('float32'))
             #     clip_out = clip_out.permute(0, 3, 1, 2)
             #     video.append({'name': output_file + '/' + video_id + f'_{_start}_{_end}.npy', 'video': clip_out})
+            if start_list is None or end_list is None:
+                # Fix 1s clip
+                duration = int(raw_video.shape[0] // self.framerate)
+                start_list = np.arange(duration)
+                end_list = np.arange(duration) + 1
             clips = []
             for _start, _end in zip(start_list, end_list):
                 _start_frame = int(_start * self.framerate)
@@ -149,7 +167,7 @@ class VideoClipDataset(Dataset):
                 clip_out = raw_video[ _start_frame : _end_frame,:,:,:]
                 clips.append({'output_path': output_file + '/' + video_id + f'_{_start}_{_end}.npy', 'data': clip_out})
         else:
-            video = torch.zeros(1)
-            raise IOError('Invalid Video')
+            print(f'Not founded: {video_path}/{video_id}')
+            return {'input': video_path, 'video_id': 'NoFile', 'output_path': output_file}
             
-        return {'input': clips, 'input_path': video_path, 'output_path': output_file}
+        return {'input': clips, 'video_id': video_id, 'output_path': output_file}

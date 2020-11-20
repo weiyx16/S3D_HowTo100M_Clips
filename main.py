@@ -17,14 +17,19 @@ parser.add_argument('--batch_size', type=int, default=64, help='batch size')
 parser.add_argument('--id2path', type=str, help='csv file with an map from id to video path')
 parser.add_argument('--ann_file', type=str, help='caption.json in HowTo100M')
 parser.add_argument('--data_root', type=str, default='./', help='data root of all the relative path')
-args = parser.parse_args()
+parser.add_argument('--ITP', action='store_true', default=False, help='using ITP')
+args, leftovers = parser.parse_known_args()
 # python main.py --batch_size 32 --id2path test_id2path.csv --ann_file ../annotation/caption.json --data_root ./
 
+# For ITP
+if args.ITP:
+    os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['OMPI_COMM_WORLD_LOCAL_RANK']
+    args.id2path = args.id2path + os.environ['CUDA_VISIBLE_DEVICES'] + ".csv"
+    print('{} {} {} {}'.format(os.environ['CUDA_VISIBLE_DEVICES'], torch.cuda.current_device(), torch.cuda.device_count(), args.id2path))
 # Instantiate the model
-# TODO-1: Multi-GPU
-net = S3D('./s3d_dict.npy', 512) # text module
+net = S3D(f'{args.data_root}/s3d_dict.npy', 512) # text module
 net = net.cuda()
-net.load_state_dict(torch.load('./s3d_howto100m.pth')) # S3D
+net.load_state_dict(torch.load(f'{args.data_root}/s3d_howto100m.pth')) # S3D
 
 # Video input should be of size Batch x 3 x T x H x W and normalized to [0, 1] 
 dataset = VideoClipDataset(
@@ -42,7 +47,7 @@ loader = DataLoader(
     dataset,
     batch_size=1,
     shuffle=False,
-    num_workers=8,
+    num_workers=2,
     sampler=sampler if n_dataset > 10 else None,
 )
 preprocess = Preprocessing(framenum=16)
@@ -50,11 +55,15 @@ preprocess = Preprocessing(framenum=16)
 device_id = os.environ['CUDA_VISIBLE_DEVICES']
 # Evaluation mode
 net = net.eval()
- 
+
+feature_file = {}
 with torch.no_grad():
     time_s = time.time()
     for k, data in enumerate(loader):
-        input_file = data['input_path'][0]
+        if data['video_id'][0] == 'NoFile':
+            print('{} Computing features of video {}/{}: {}, But File Load Failed or Caption Not Exists'.format(device_id, k + 1, n_dataset, data['video_id'][0]))
+            continue
+        video_id = data['video_id'][0]
         # Load
         clip_lengths = []
         output_files = []
@@ -90,17 +99,20 @@ with torch.no_grad():
             features = features.astype('float16')
         # Save
         clip_end = 0
+        clip_feature = []
         for clip_idx, output_file in enumerate(output_files):
             clip_begin = clip_end
             clip_end = clip_begin + clip_lengths[clip_idx]
-            np.save(output_file, features[ clip_begin : clip_end ])    
-        print('{} Computing features of video {}/{}: {}, estimation: {}'.format(device_id, k + 1, n_dataset, input_file, (time.time() - time_s) * (n_dataset-k-1) / (k+1) / 3600))
+            clip_feature.append(features[ clip_begin : clip_end ])
+            # np.save(output_file, features[ clip_begin : clip_end ])   
+        # Save Way 2 
+        feature_file[video_id] = clip_feature
+        print('{} Computing features of video {}/{}: {}, estimation: {}'.format(device_id, k + 1, n_dataset, video_id, (time.time() - time_s) * (n_dataset-k-1) / (k+1) / 3600))
 
         # Zip & remove.
-        output_dir = data['output_path'][0]
-        video_id = input_file.split('/')[-1].split('.')[0]
-        cmd = f'zip -0 -q {output_dir}.zip {output_dir}/*'
-        subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL)
-        shutil.rmtree(output_dir)
-# Text inference
-# Text_output = net.text_module(['open door', 'cut tomato'])
+        # output_dir = data['output_path'][0]
+        # cmd = f'zip -0 -q {output_dir}.zip {output_dir}/*'
+        # subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL)
+        # shutil.rmtree(output_dir)
+    # Dump the feature_file
+    torch.save(feature_file, os.path.join(data['output_path'][0], f"{device_id}.pth"))
